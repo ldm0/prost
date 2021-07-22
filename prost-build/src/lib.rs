@@ -229,6 +229,7 @@ pub struct Config {
     prost_types: bool,
     strip_enum_prefix: bool,
     out_dir: Option<PathBuf>,
+    single_file_mode: Option<PathBuf>,
     extern_paths: Vec<(String, String)>,
     default_package_filename: String,
     protoc_args: Vec<OsString>,
@@ -689,6 +690,16 @@ impl Config {
         self
     }
 
+    /// Use prost as "single file mode", which disables dependencies' protobuf
+    /// binding generation. And writes the pb to a single file.
+    pub fn single_file_mode<P>(&mut self, output_file_path: P) -> &mut Self
+    where
+        P: Into<PathBuf>,
+    {
+        self.single_file_mode = Some(output_file_path.into());
+        self
+    }
+
     /// Add an argument to the `protoc` protobuf compilation invocation.
     ///
     /// # Example `build.rs`
@@ -847,6 +858,40 @@ impl Config {
             )
         })?;
 
+        if let Some(single_out_path) = &self.single_file_mode {
+            let single_out_path = single_out_path.clone();
+            fn find_root(files: Vec<FileDescriptorProto>) -> Option<FileDescriptorProto> {
+                let mut packages = vec![];
+                let mut dependencies = std::collections::HashSet::new();
+                for (index, file) in files.iter().enumerate() {
+                    packages.push((index, file.package()));
+                    for dep in file.dependency.iter() {
+                        dependencies.insert(dep.clone());
+                    }
+                }
+                let mut root_index = None;
+                for (index, pkg) in packages {
+                    if dependencies.get(pkg).is_none() {
+                        root_index = Some(index);
+                    }
+                }
+
+                root_index.and_then(move |x| files.into_iter().nth(x))
+            }
+            let files = file_descriptor_set.file;
+            let message_graph = MessageGraph::new(&files)
+                .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+            let extern_paths = ExternPaths::new(&self.extern_paths, self.prost_types)
+                .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+
+            let root_file = find_root(files).expect("failed to find root");
+            let mut content = String::new();
+            CodeGenerator::generate(self, &message_graph, &extern_paths, root_file, &mut content);
+
+            fs::write(single_out_path, content)?;
+            return Ok(());
+        }
+
         let modules = self.generate(file_descriptor_set.file)?;
         for (module, content) in &modules {
             let mut filename = if module.is_empty() {
@@ -1001,6 +1046,7 @@ impl default::Default for Config {
             prost_types: true,
             strip_enum_prefix: true,
             out_dir: None,
+            single_file_mode: None,
             extern_paths: Vec::new(),
             default_package_filename: "_".to_string(),
             protoc_args: Vec::new(),
@@ -1023,6 +1069,7 @@ impl fmt::Debug for Config {
             .field("prost_types", &self.prost_types)
             .field("strip_enum_prefix", &self.strip_enum_prefix)
             .field("out_dir", &self.out_dir)
+            .field("single_file_mode", &self.single_file_mode)
             .field("extern_paths", &self.extern_paths)
             .field("default_package_filename", &self.default_package_filename)
             .field("protoc_args", &self.protoc_args)
