@@ -772,10 +772,11 @@ impl Config {
 
         let modules = self.generate(file_descriptor_set.file)?;
         for (module, content) in modules {
-            let mut filename = module.join(".");
-            filename.push_str(".rs");
+            let mut filename = module.join("/");
+            filename.push_str("/mod.rs");
 
             let output_path = target.join(&filename);
+            fs::create_dir_all(output_path.parent().unwrap())?;
 
             let previous_content = fs::read(&output_path);
 
