@@ -36,6 +36,7 @@ pub struct CodeGenerator<'a> {
     depth: u8,
     path: Vec<i32>,
     buf: &'a mut String,
+    mods: Vec<String>,
 }
 
 fn push_indent(buf: &mut String, depth: u8) {
@@ -79,6 +80,7 @@ impl<'a> CodeGenerator<'a> {
             depth: 0,
             path: Vec::new(),
             buf,
+            mods: Vec::new(),
         };
 
         debug!(
@@ -122,13 +124,9 @@ impl<'a> CodeGenerator<'a> {
     fn append_message(&mut self, message: DescriptorProto) {
         debug!("  message: {:?}", message.name());
 
-        let message_name = message.name().to_string();
-        let fq_message_name = format!(
-            "{}{}.{}",
-            if self.package.is_empty() { "" } else { "." },
-            self.package,
-            message.name()
-        );
+        let raw_message_name = message.name().to_string();
+        let message_name = format!("{}{}", self.mods.join(""), raw_message_name);
+        let fq_message_name = format!(".{}.{}", self.package, message_name);
 
         // Skip external types.
         if self.extern_paths.resolve_ident(&fq_message_name).is_some() {
@@ -156,7 +154,7 @@ impl<'a> CodeGenerator<'a> {
                     assert_eq!("key", key.name());
                     assert_eq!("value", value.name());
 
-                    let name = format!("{}.{}", &fq_message_name, nested_type.name());
+                    let name = format!("{}_{}", &fq_message_name, nested_type.name());
                     Either::Right((name, (key, value)))
                 } else {
                     Either::Left((nested_type, idx))
@@ -188,7 +186,7 @@ impl<'a> CodeGenerator<'a> {
             .push_str("#[derive(Clone, PartialEq, ::prost::Message)]\n");
         self.push_indent();
         self.buf.push_str("pub struct ");
-        self.buf.push_str(&to_upper_camel(&message_name));
+        self.buf.push_str(&message_name);
         self.buf.push_str(" {\n");
 
         self.depth += 1;
@@ -198,7 +196,7 @@ impl<'a> CodeGenerator<'a> {
             match field
                 .type_name
                 .as_ref()
-                .and_then(|type_name| map_types.get(type_name))
+                .and_then(|type_name| map_types.get(&self.to_rust_path(type_name)))
             {
                 Some(&(ref key, ref value)) => {
                     self.append_map_field(&fq_message_name, field, key, value)
@@ -229,7 +227,7 @@ impl<'a> CodeGenerator<'a> {
         self.buf.push_str("}\n");
 
         if !message.enum_type.is_empty() || !nested_types.is_empty() || !oneof_fields.is_empty() {
-            self.push_mod(&message_name);
+            self.push_mod(&raw_message_name);
             self.path.push(3);
             for (nested_type, idx) in nested_types {
                 self.path.push(idx as i32);
@@ -461,11 +459,7 @@ impl<'a> CodeGenerator<'a> {
         oneof: &OneofDescriptorProto,
         fields: &[(FieldDescriptorProto, usize)],
     ) {
-        let name = format!(
-            "{}::{}",
-            to_snake(message_name),
-            to_upper_camel(oneof.name())
-        );
+        let name = format!("{}_{}", message_name, oneof.name());
         self.append_doc(fq_message_name, None);
         self.push_indent();
         self.buf.push_str(&format!(
@@ -480,7 +474,7 @@ impl<'a> CodeGenerator<'a> {
         self.push_indent();
         self.buf.push_str(&format!(
             "pub {}: ::core::option::Option<{}>,\n",
-            to_snake(oneof.name()),
+            oneof.name(),
             name
         ));
     }
@@ -498,14 +492,15 @@ impl<'a> CodeGenerator<'a> {
         self.path.pop();
         self.path.pop();
 
-        let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
-        self.append_type_attributes(&oneof_name);
+        let oneof_name = format!("{}{}", self.mods.join(""), oneof.name());
+        let fq_oneof_name = format!("{}_{}", fq_message_name, oneof.name());
+        self.append_type_attributes(&fq_oneof_name);
         self.push_indent();
         self.buf
             .push_str("#[derive(Clone, PartialEq, ::prost::Oneof)]\n");
         self.push_indent();
         self.buf.push_str("pub enum ");
-        self.buf.push_str(&to_upper_camel(oneof.name()));
+        self.buf.push_str(&oneof_name);
         self.buf.push_str(" {\n");
 
         self.path.push(2);
@@ -524,7 +519,7 @@ impl<'a> CodeGenerator<'a> {
                 ty_tag,
                 field.number()
             ));
-            self.append_field_attributes(&oneof_name, field.name());
+            self.append_field_attributes(&fq_oneof_name, field.name());
 
             self.push_indent();
             let ty = self.resolve_type(&field, fq_message_name);
@@ -587,14 +582,10 @@ impl<'a> CodeGenerator<'a> {
         debug!("  enum: {:?}", desc.name());
 
         // Skip external types.
-        let enum_name = &desc.name();
+        let raw_enum_name = desc.name().to_string();
+        let enum_name = format!("{}{}", self.mods.join(""), raw_enum_name);
+        let fq_enum_name = format!(".{}.{}", self.package, enum_name);
         let enum_values = &desc.value;
-        let fq_enum_name = format!(
-            "{}{}.{}",
-            if self.package.is_empty() { "" } else { "." },
-            self.package,
-            enum_name
-        );
         if self.extern_paths.resolve_ident(&fq_enum_name).is_some() {
             return;
         }
@@ -609,7 +600,7 @@ impl<'a> CodeGenerator<'a> {
         self.buf.push_str("#[repr(i32)]\n");
         self.push_indent();
         self.buf.push_str("pub enum ");
-        self.buf.push_str(&to_upper_camel(desc.name()));
+        self.buf.push_str(&enum_name);
         self.buf.push_str(" {\n");
 
         let mut numbers = HashSet::new();
@@ -648,7 +639,7 @@ impl<'a> CodeGenerator<'a> {
         self.append_doc(fq_enum_name, Some(value.name()));
         self.append_field_attributes(fq_enum_name, &value.name());
         self.push_indent();
-        let name = to_upper_camel(value.name());
+        let name = value.name();
         let name_unprefixed = match prefix_to_strip {
             Some(prefix) => strip_enum_prefix(&prefix, &name),
             None => &name,
@@ -719,30 +710,13 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn push_mod(&mut self, module: &str) {
-        self.push_indent();
-        self.buf.push_str("/// Nested message and enum types in `");
-        self.buf.push_str(module);
-        self.buf.push_str("`.\n");
-
-        self.push_indent();
-        self.buf.push_str("pub mod ");
-        self.buf.push_str(&to_snake(module));
-        self.buf.push_str(" {\n");
-
-        self.package.push('.');
-        self.package.push_str(module);
-
-        self.depth += 1;
+        let mut mod_prefix = module.to_string();
+        mod_prefix.push('_');
+        self.mods.push(mod_prefix);
     }
 
     fn pop_mod(&mut self) {
-        self.depth -= 1;
-
-        let idx = self.package.rfind('.').unwrap();
-        self.package.truncate(idx);
-
-        self.push_indent();
-        self.buf.push_str("}\n");
+        self.mods.pop();
     }
 
     fn resolve_type(&self, field: &FieldDescriptorProto, fq_message_name: &str) -> String {
@@ -767,6 +741,43 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
+    /// ```protobuf
+    /// package basic.v1;
+    /// message Foo {
+    ///      message Bar {
+    ///      }
+    /// }
+    /// ```
+    ///
+    /// ```protobuf
+    /// package another.v1;
+    /// message Baz {
+    ///      Foo.Bar tmp
+    /// }
+    /// ```
+    ///
+    /// In SDK's generated rust code, basic.v1.Foo.Bar is basic::v1::Foo_Bar,
+    /// and the rule is: (from left to right) after the first path which is a
+    /// message, all combinators are '_'.
+    fn to_rust_path(&self, pb_ident: &str) -> String {
+        let mut new_path = vec![];
+        let mut found_message = false;
+        for (index, &ch) in pb_ident.as_bytes().iter().enumerate() {
+            let ch = if ch == b'.' {
+                if found_message || self.message_graph.is_present(&pb_ident[..index]) {
+                    found_message = true;
+                    b'_'
+                } else {
+                    b'.'
+                }
+            } else {
+                ch
+            };
+            new_path.push(ch);
+        }
+        String::from_utf8(new_path).unwrap()
+    }
+
     fn resolve_ident(&self, pb_ident: &str) -> String {
         // protoc should always give fully qualified identifiers.
         assert_eq!(".", &pb_ident[..1]);
@@ -784,7 +795,9 @@ impl<'a> CodeGenerator<'a> {
             local_path.next();
         }
 
-        let mut ident_path = pb_ident[1..].split('.');
+        let ident_path = self.to_rust_path(pb_ident);
+
+        let mut ident_path = ident_path[1..].split('.');
         let ident_type = ident_path.next_back().unwrap();
         let mut ident_path = ident_path.peekable();
 
@@ -796,8 +809,8 @@ impl<'a> CodeGenerator<'a> {
 
         local_path
             .map(|_| "super".to_string())
-            .chain(ident_path.map(to_snake))
-            .chain(iter::once(to_upper_camel(ident_type)))
+            .chain(ident_path.map(|x| x.to_string()))
+            .chain(iter::once(ident_type.to_string()))
             .join("::")
     }
 

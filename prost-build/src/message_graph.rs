@@ -46,6 +46,10 @@ impl MessageGraph {
             .or_insert_with(|| graph.add_node(msg_name))
     }
 
+    pub fn is_present(&self, msg_name: &str) -> bool {
+        self.index.get(msg_name).is_some()
+    }
+
     /// Adds message to graph IFF it contains a non-repeated field containing another message.
     /// The purpose of the message graph is detecting recursively nested messages and co-recursively nested messages.
     /// Because prost does not box message fields, recursively nested messages would not compile in Rust.
