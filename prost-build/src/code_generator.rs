@@ -363,7 +363,7 @@ impl<'a> CodeGenerator<'a> {
                 }
                 self.buf.push_str("\\\"");
             } else if type_ == Type::Enum {
-                let enum_value = to_upper_camel(default);
+                let enum_value = default;
                 let stripped_prefix = if self.config.strip_enum_prefix {
                     // Field types are fully qualified, so we extract
                     // the last segment and strip it from the left
@@ -547,7 +547,7 @@ impl<'a> CodeGenerator<'a> {
                 ));
             } else {
                 self.buf
-                    .push_str(&format!("{}({}),\n", to_upper_camel(field.name()), ty));
+                    .push_str(&format!("{}({}),\n", field.name(), ty));
             }
         }
         self.depth -= 1;
