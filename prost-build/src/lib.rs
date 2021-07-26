@@ -230,6 +230,10 @@ pub struct Config {
     strip_enum_prefix: bool,
     out_dir: Option<PathBuf>,
     single_file_mode: Option<PathBuf>,
+    /// Namespace of the output Rust protobuf binding. If set, prost will use
+    /// absolute path for struct finding rather than relative path.
+    /// e.g.: `crate::idl::client::basic::v1::Tmp` rather than `super::super::basic::v1::Tmp`.
+    rust_namespace: Option<String>,
     extern_paths: Vec<(String, String)>,
     default_package_filename: String,
     protoc_args: Vec<OsString>,
@@ -700,6 +704,14 @@ impl Config {
         self
     }
 
+    /// Namespace of the output Rust protobuf binding. If set, prost will use
+    /// absolute path for struct finding rather than relative path.
+    /// e.g.: `crate::idl::client::basic::v1::Tmp` rather than `super::super::basic::v1::Tmp`.
+    pub fn rust_namespace(&mut self, rust_namespace: &str) -> &mut Self {
+        self.rust_namespace = Some(rust_namespace.to_string());
+        self
+    }
+
     /// Add an argument to the `protoc` protobuf compilation invocation.
     ///
     /// # Example `build.rs`
@@ -886,7 +898,14 @@ impl Config {
 
             let root_file = find_root(files).expect("failed to find root");
             let mut content = String::new();
-            CodeGenerator::generate(self, &message_graph, &extern_paths, root_file, &mut content);
+            CodeGenerator::generate(
+                self,
+                &message_graph,
+                &extern_paths,
+                self.rust_namespace.clone(),
+                root_file,
+                &mut content,
+            );
 
             fs::write(single_out_path, content)?;
             return Ok(());
@@ -1012,7 +1031,14 @@ impl Config {
             }
 
             let mut buf = modules.entry(module).or_insert_with(String::new);
-            CodeGenerator::generate(self, &message_graph, &extern_paths, file, &mut buf);
+            CodeGenerator::generate(
+                self,
+                &message_graph,
+                &extern_paths,
+                self.rust_namespace.clone(),
+                file,
+                &mut buf,
+            );
         }
 
         if let Some(ref mut service_generator) = self.service_generator {
@@ -1047,6 +1073,7 @@ impl default::Default for Config {
             strip_enum_prefix: true,
             out_dir: None,
             single_file_mode: None,
+            rust_namespace: None,
             extern_paths: Vec::new(),
             default_package_filename: "_".to_string(),
             protoc_args: Vec::new(),

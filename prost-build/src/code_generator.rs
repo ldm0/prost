@@ -37,6 +37,7 @@ pub struct CodeGenerator<'a> {
     path: Vec<i32>,
     buf: &'a mut String,
     mods: Vec<String>,
+    rust_namespace: Option<String>,
 }
 
 fn push_indent(buf: &mut String, depth: u8) {
@@ -50,6 +51,7 @@ impl<'a> CodeGenerator<'a> {
         config: &mut Config,
         message_graph: &MessageGraph,
         extern_paths: &ExternPaths,
+        rust_namespace: Option<String>,
         file: FileDescriptorProto,
         buf: &mut String,
     ) {
@@ -79,6 +81,7 @@ impl<'a> CodeGenerator<'a> {
             extern_paths,
             depth: 0,
             path: Vec::new(),
+            rust_namespace,
             buf,
             mods: Vec::new(),
         };
@@ -798,6 +801,15 @@ impl<'a> CodeGenerator<'a> {
         let ident_path = self.to_rust_path(pb_ident);
 
         let mut ident_path = ident_path[1..].split('.');
+
+        // When we get a rust_namespace, use absolute path rather than relative path.
+        if let Some(rust_namespace) = &self.rust_namespace {
+            let ident_path = ident_path.join("::");
+            let mut rust_path = rust_namespace.clone();
+            rust_path.push_str(&ident_path);
+            return rust_path;
+        }
+
         let ident_type = ident_path.next_back().unwrap();
         let mut ident_path = ident_path.peekable();
 
