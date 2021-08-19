@@ -19,6 +19,15 @@ pub mod encoding;
 pub use crate::error::{DecodeError, EncodeError};
 pub use crate::message::Message;
 
+/// For compatibility with rust-protobuf
+pub use crate::error::DecodeError as ProtobufError;
+/// For compatibility with rust-protobuf
+pub struct ProtobufEnum;
+/// For compatibility with rust-protobuf
+pub fn parse_from_bytes<M: Message + Default>(bytes: &[u8]) -> Result<M, DecodeError> {
+    M::parse_from_bytes(bytes)
+}
+
 use bytes::{Buf, BufMut};
 
 use crate::encoding::{decode_varint, encode_varint, encoded_len_varint};

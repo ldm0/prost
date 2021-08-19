@@ -546,8 +546,7 @@ impl<'a> CodeGenerator<'a> {
                     ty
                 ));
             } else {
-                self.buf
-                    .push_str(&format!("{}({}),\n", field.name(), ty));
+                self.buf.push_str(&format!("{}({}),\n", field.name(), ty));
             }
         }
         self.depth -= 1;

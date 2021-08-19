@@ -116,6 +116,25 @@ pub trait Message: Debug + Send + Sync {
         Self::merge(&mut message, &mut buf).map(|_| message)
     }
 
+    #[cfg(feature = "std")]
+    #[inline]
+    /// For compatibility with rust-protobuf
+    fn write_to_bytes(&self) -> Result<Vec<u8>, DecodeError>
+    where
+        Self: Sized,
+    {
+        Ok(self.encode_to_vec())
+    }
+
+    #[inline]
+    /// For compatibility with rust-protobuf
+    fn parse_from_bytes(bytes: &[u8]) -> Result<Self, DecodeError>
+    where
+        Self: Default,
+    {
+        Self::decode(bytes)
+    }
+
     /// Decodes a length-delimited instance of the message from the buffer.
     fn decode_length_delimited<B>(buf: B) -> Result<Self, DecodeError>
     where
