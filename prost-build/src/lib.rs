@@ -127,7 +127,11 @@
 //!
 //! [`protobuf-src`]: https://docs.rs/protobuf-src
 
+use std::collections::hash_map;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::default;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -138,6 +142,7 @@ use std::ops::RangeToInclusive;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use local_paths::LocalPaths;
 use log::debug;
 use log::trace;
 
@@ -155,8 +160,10 @@ mod ast;
 mod code_generator;
 mod extern_paths;
 mod ident;
+mod local_paths;
 mod message_graph;
 mod path;
+mod util;
 
 /// A service generator takes a service descriptor and generates Rust code.
 ///
@@ -248,7 +255,9 @@ pub struct Config {
     enum_attributes: PathMap<String>,
     field_attributes: PathMap<String>,
     boxed: PathMap<()>,
+    oneof_attributes: Vec<String>,
     prost_types: bool,
+    gen_crates: Option<String>,
     strip_enum_prefix: bool,
     out_dir: Option<PathBuf>,
     extern_paths: Vec<(String, String)>,
@@ -260,6 +269,12 @@ pub struct Config {
     include_file: Option<PathBuf>,
     prost_path: Option<String>,
     fmt: bool,
+}
+
+#[derive(Default)]
+struct PackageCrate {
+    content: String,
+    imports: BTreeSet<Vec<String>>,
 }
 
 impl Config {
@@ -559,6 +574,23 @@ impl Config {
             .insert(path.as_ref().to_string(), attribute.as_ref().to_string());
         self
     }
+
+    /// Add attribute for oneof types.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # let mut config = prost_build::Config::new();
+    /// config.oneof_attribute("#[serde(rename_all = \"snake_case\")]");
+    /// ```
+    pub fn oneof_attribute<A>(&mut self, attribute: A) -> &mut Self
+    where
+        A: AsRef<str>,
+    {
+        self.oneof_attributes.push(attribute.as_ref().to_string());
+        self
+    }
+
 
     /// Wrap matched fields in a `Box`.
     ///
@@ -905,6 +937,11 @@ impl Config {
         self
     }
 
+    pub fn gen_crates(&mut self, crate_base: impl Into<String>) -> &mut Self {
+        self.gen_crates = Some(crate_base.into());
+        self
+    }
+
     /// Configures the code generator to format the output code via `prettyplease`.
     ///
     /// By default, this is enabled but if the `format` feature is not enabled this does
@@ -944,6 +981,51 @@ impl Config {
                     Into::into(val)
                 })
         })?;
+
+        if let Some(crate_base) = self.gen_crates.clone() {
+            let files = fds.file;
+            let local_paths = LocalPaths::new(&files)
+                .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+            let crates = self.generate_crates(&local_paths, files)?;
+            let mut modules = BTreeSet::new();
+            for (module, PackageCrate { content, imports }) in crates {
+                // ignore empty modules.
+                if content.is_empty() {
+                    continue;
+                }
+                let crate_name = if module.is_empty() {
+                    self.default_package_filename.clone()
+                } else {
+                    format!("{}_{}", crate_base, module.join("_"))
+                };
+
+                let codegen_path = target.join(&format!("{}/src/codegen.rs", crate_name));
+                let cargo_toml_path = target.join(&format!("{}/Cargo.toml", crate_name));
+                let lib_rs_path = target.join(&format!("{}/src/lib.rs", crate_name));
+
+                fs::create_dir_all(&codegen_path.parent().unwrap())?;
+                trace!("start codegen");
+                {
+                    util::write_on_diff(&codegen_path, content.as_bytes()).unwrap();
+                    trace!("{:?}", codegen_path);
+                }
+                {
+                    const DATA: &[u8] = b"#[allow(text_direction_codepoint_in_literal)]\n#[rustfmt::skip]\nmod codegen;\n\npub use codegen::*;\n";
+                    util::write_on_diff(&lib_rs_path, DATA).unwrap();
+                    trace!("{:?}", lib_rs_path);
+                }
+                {
+                    let cargo_toml_data = gen_cargo_toml(&crate_base, &crate_name, &imports);
+                    util::write_on_diff(&cargo_toml_path, cargo_toml_data.as_bytes()).unwrap();
+                    trace!("{:?}", cargo_toml_path);
+                }
+                modules.insert(module);
+            }
+
+            self.generate_base_crate(&local_paths, &target, &crate_base, modules)?;
+
+            return Ok(());
+        }
 
         let requests = fds
             .file
@@ -1180,6 +1262,183 @@ impl Config {
         outfile.write_all(format!("{}{}\n", ("    ").to_owned().repeat(depth), line).as_bytes())
     }
 
+    fn generate_base_crate(
+        &self,
+        local_paths: &LocalPaths,
+        target: &Path,
+        crate_base: &str,
+        modules: BTreeSet<Vec<String>>,
+    ) -> Result<()> {
+        #[derive(Default)]
+        struct ModuleNode {
+            is_crate: bool,
+            /// name -> node
+            children: BTreeMap<String, ModuleNode>,
+        }
+
+        impl ModuleNode {
+            fn new(modules: HashSet<Vec<String>>) -> Self {
+                let mut tree = Self::default();
+                for module in modules {
+                    tree.insert(module.into_iter());
+                }
+                tree
+            }
+
+            fn insert(&mut self, mut modules: impl Iterator<Item = String>) {
+                if let Some(module) = modules.next() {
+                    let node = self
+                        .children
+                        .entry(module)
+                        .or_insert_with(|| Default::default());
+                    node.insert(modules);
+                } else {
+                    self.is_crate = true;
+                }
+            }
+        }
+
+        struct BaseCratePrinter<'a> {
+            local_paths: &'a LocalPaths,
+            crate_base: String,
+            tab: Vec<String>,
+        }
+
+        impl<'a> BaseCratePrinter<'a> {
+            fn print(
+                local_paths: &'a LocalPaths,
+                crate_base: &str,
+                root: &ModuleNode,
+                buf: &mut String,
+            ) {
+                let mut printer = BaseCratePrinter {
+                    local_paths,
+                    crate_base: crate_base.to_string(),
+                    tab: vec![],
+                };
+                printer.print_module(root, buf);
+            }
+
+            fn tab(&mut self, module_name: &str) {
+                self.tab.push(module_name.to_string());
+            }
+
+            fn untab(&mut self) {
+                self.tab.pop();
+            }
+
+            fn print_indent(&self, buf: &mut String) {
+                const TAB: &str = "    ";
+                for _ in 0..self.tab.len() {
+                    buf.push_str(TAB);
+                }
+            }
+
+            fn current_package(&self) -> String {
+                let mut s = String::new();
+                for tab in self.tab.iter() {
+                    s.push('.');
+                    s.push_str(tab);
+                }
+                s
+            }
+
+            fn print_module(&mut self, node: &ModuleNode, buf: &mut String) {
+                if node.is_crate {
+                    let package = self.current_package();
+                    let krates = self
+                        .local_paths
+                        .file_path(&package)
+                        .expect(&format!("unknown package: {}", package));
+                    for krate in krates {
+                        self.print_indent(buf);
+                        buf.push_str("pub use ");
+                        buf.push_str(&self.crate_base);
+                        buf.push_str("_");
+                        buf.push_str(&krate.join("_"));
+                        buf.push_str("::*;\n");
+                    }
+                }
+
+                for (name, child) in node.children.iter() {
+                    self.print_indent(buf);
+                    buf.push_str("pub mod ");
+                    buf.push_str(name);
+                    buf.push_str(" {\n");
+
+                    self.tab(name);
+                    self.print_module(child, buf);
+                    self.untab();
+
+                    self.print_indent(buf);
+                    buf.push_str("}\n");
+                }
+            }
+        }
+
+        let cargo_toml_path = target.join(&format!("{}/Cargo.toml", crate_base));
+        let codegen_path = target.join(&format!("{}/src/lib.rs", crate_base));
+        fs::create_dir_all(codegen_path.parent().unwrap())?;
+
+        trace!("start writing base crate toml: {:?}", cargo_toml_path);
+        let cargo_toml = gen_cargo_toml(crate_base, crate_base, &modules);
+        util::write_on_diff(cargo_toml_path, cargo_toml.as_bytes())?;
+
+        trace!("start writing base crate: {:?}", codegen_path);
+        let modules: HashSet<String> = modules
+            .into_iter()
+            .map(|x| local_paths.pb_path(&x).expect("unknown file").clone())
+            .collect();
+        let modules: HashSet<Vec<String>> = modules
+            .into_iter()
+            .map(|x| {
+                x.split('.')
+                    .filter(|s| !s.is_empty())
+                    .map(|x| x.to_string())
+                    .collect()
+            })
+            .collect();
+        let module_tree = ModuleNode::new(modules);
+        let mut buf = String::new();
+        BaseCratePrinter::print(local_paths, crate_base, &module_tree, &mut buf);
+        util::write_on_diff(codegen_path, buf.as_bytes())?;
+        Ok(())
+    }
+
+    fn generate_crates(
+        &mut self,
+        local_paths: &LocalPaths,
+        files: Vec<FileDescriptorProto>,
+    ) -> Result<HashMap<Vec<String>, PackageCrate>> {
+        let mut modules = HashMap::new();
+
+        let message_graph = MessageGraph::new(files.iter())
+            .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+        let extern_paths = ExternPaths::new(&self.extern_paths, self.prost_types)
+            .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+
+        for file in files {
+            let file_path: Vec<String> = util::get_file_path(&file);
+            let PackageCrate { content, imports } = match modules.entry(file_path.clone()) {
+                hash_map::Entry::Occupied(_) => unreachable!(
+                    "Shouldn't get same file path in two different FileDescriptorProtos"
+                ),
+                hash_map::Entry::Vacant(x) => x.insert(PackageCrate::default()),
+            };
+            CodeGenerator::generate(
+                self,
+                &message_graph,
+                &extern_paths,
+                &local_paths,
+                file,
+                content,
+                imports,
+                file_path,
+            );
+        }
+        Ok(modules)
+    }
+
     /// Processes a set of modules and file descriptors, returning a map of modules to generated
     /// code contents.
     ///
@@ -1197,6 +1456,8 @@ impl Config {
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
         let extern_paths = ExternPaths::new(&self.extern_paths, self.prost_types)
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+        let local_paths = LocalPaths::default();
+        let imports = &mut BTreeSet::new();
 
         for (request_module, request_fd) in requests {
             // Only record packages that have services
@@ -1206,7 +1467,16 @@ impl Config {
             let buf = modules
                 .entry(request_module.clone())
                 .or_insert_with(String::new);
-            CodeGenerator::generate(self, &message_graph, &extern_paths, request_fd, buf);
+            CodeGenerator::generate(
+                self,
+                &message_graph,
+                &extern_paths,
+                &local_paths,
+                request_fd,
+                buf,
+                imports,
+                Vec::new(),
+            );
             if buf.is_empty() {
                 // Did not generate any code, remove from list to avoid inclusion in include file or output file list
                 modules.remove(&request_module);
@@ -1252,7 +1522,9 @@ impl default::Default for Config {
             enum_attributes: PathMap::default(),
             field_attributes: PathMap::default(),
             boxed: PathMap::default(),
+            oneof_attributes: Vec::new(),
             prost_types: true,
+            gen_crates: None,
             strip_enum_prefix: true,
             out_dir: None,
             extern_paths: Vec::new(),
@@ -1277,6 +1549,7 @@ impl fmt::Debug for Config {
             .field("bytes_type", &self.bytes_type)
             .field("type_attributes", &self.type_attributes)
             .field("field_attributes", &self.field_attributes)
+            .field("oneof_attributes", &self.oneof_attributes)
             .field("prost_types", &self.prost_types)
             .field("strip_enum_prefix", &self.strip_enum_prefix)
             .field("out_dir", &self.out_dir)
@@ -1493,6 +1766,32 @@ pub fn protoc_include_from_env() -> Option<PathBuf> {
     }
 
     Some(protoc_include)
+}
+
+fn gen_cargo_toml(crate_base: &str, crate_name: &str, imports: &BTreeSet<Vec<String>>) -> String {
+    let mut file = format!(
+        r#"[package]
+name = "{}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+prost = {{ workspace = true }}
+serde = {{ version = "1", features = ["derive"] }}
+num-derive = {{ workspace = true }}
+num-traits = {{ workspace = true }}
+"#,
+        crate_name
+    );
+    for import in imports.iter() {
+        let import_crate_name = format!("{}_{}", crate_base, import.join("_"));
+        file.push_str(&format!(
+            r#"{} = {{ path = "../{}" }}"#,
+            import_crate_name, import_crate_name
+        ));
+        file.push('\n');
+    }
+    file
 }
 
 #[cfg(test)]

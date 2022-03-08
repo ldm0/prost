@@ -1,6 +1,6 @@
 use std::ascii;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter;
 
 use itertools::{Either, Itertools};
@@ -17,6 +17,7 @@ use prost_types::{
 use crate::ast::{Comments, Method, Service};
 use crate::extern_paths::ExternPaths;
 use crate::ident::{to_snake, to_upper_camel};
+use crate::local_paths::LocalPaths;
 use crate::message_graph::MessageGraph;
 use crate::{BytesType, Config, MapType};
 
@@ -33,9 +34,12 @@ pub struct CodeGenerator<'a> {
     syntax: Syntax,
     message_graph: &'a MessageGraph,
     extern_paths: &'a ExternPaths,
+    local_paths: &'a LocalPaths,
     depth: u8,
     path: Vec<i32>,
     buf: &'a mut String,
+    imports: &'a mut BTreeSet<Vec<String>>,
+    file_path: Vec<String>,
 }
 
 fn push_indent(buf: &mut String, depth: u8) {
@@ -48,8 +52,11 @@ impl<'a> CodeGenerator<'a> {
         config: &mut Config,
         message_graph: &MessageGraph,
         extern_paths: &ExternPaths,
+        local_paths: &LocalPaths,
         file: FileDescriptorProto,
         buf: &mut String,
+        imports: &mut BTreeSet<Vec<String>>,
+        file_path: Vec<String>,
     ) {
         let source_info = file.source_code_info.map(|mut s| {
             s.location.retain(|loc| {
@@ -73,9 +80,12 @@ impl<'a> CodeGenerator<'a> {
             syntax,
             message_graph,
             extern_paths,
+            local_paths,
             depth: 0,
             path: Vec::new(),
             buf,
+            imports,
+            file_path,
         };
 
         debug!(
@@ -297,6 +307,14 @@ impl<'a> CodeGenerator<'a> {
     fn append_enum_attributes(&mut self, fq_message_name: &str) {
         assert_eq!(b'.', fq_message_name.as_bytes()[0]);
         for attribute in self.config.enum_attributes.get(fq_message_name) {
+            push_indent(self.buf, self.depth);
+            self.buf.push_str(attribute);
+            self.buf.push('\n');
+        }
+    }
+
+    fn append_oneof_attributes(&mut self) {
+        for attribute in &self.config.oneof_attributes {
             push_indent(self.buf, self.depth);
             self.buf.push_str(attribute);
             self.buf.push('\n');
@@ -543,6 +561,7 @@ impl<'a> CodeGenerator<'a> {
         let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
         self.append_type_attributes(&oneof_name);
         self.append_enum_attributes(&oneof_name);
+        self.append_oneof_attributes();
         self.push_indent();
         self.buf
             .push_str("#[allow(clippy::derive_partial_eq_without_eq)]\n");
@@ -883,7 +902,7 @@ impl<'a> CodeGenerator<'a> {
         self.buf.push_str("}\n");
     }
 
-    fn resolve_type(&self, field: &FieldDescriptorProto, fq_message_name: &str) -> String {
+    fn resolve_type(&mut self, field: &FieldDescriptorProto, fq_message_name: &str) -> String {
         let prost_path = self.config.prost_path.as_deref().unwrap_or("::prost");
 
         match field.r#type() {
@@ -907,12 +926,65 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn resolve_ident(&self, pb_ident: &str) -> String {
+    /// return (crate path of a fully qualified separated message, relative path).
+    fn message_crate_path(&self, pb_ident: &str) -> (Vec<String>, Vec<String>) {
+        assert_eq!(".", &pb_ident[..1]);
+        let mut ident_path = pb_ident[1..].split('.');
+        let mut pb_path = String::new();
+        let mut ident;
+        let crate_path = loop {
+            // This should never panic, since message can always be find in
+            // local paths. If it panics, this indicates that the ident message
+            // file paths is incomplete.
+            ident = ident_path.next().unwrap();
+            pb_path.push('.');
+            pb_path.push_str(ident);
+            if let Some(file_path) = self.local_paths.message_file_path(&pb_path) {
+                break file_path.clone();
+            }
+        };
+        (
+            crate_path,
+            iter::once(ident)
+                .chain(ident_path)
+                .map(Into::into)
+                .collect(),
+        )
+    }
+
+    fn resolve_ident(&mut self, pb_ident: &str) -> String {
         // protoc should always give fully qualified identifiers.
         assert_eq!(".", &pb_ident[..1]);
 
         if let Some(proto_ident) = self.extern_paths.resolve_ident(pb_ident) {
             return proto_ident;
+        }
+
+        if let Some(crate_base) = &self.config.gen_crates {
+            assert_ne!(".", &self.package[..1]);
+
+            let (ident_crate_path, ident) = self.message_crate_path(pb_ident);
+
+            // `AAA.BBB.CCC -> aaa.bbb.Ccc`
+            let ident_len = ident.len();
+            let ident_path = ident.into_iter().enumerate().map(|(i, x)| {
+                if i + 1 == ident_len {
+                    to_upper_camel(&x)
+                } else {
+                    to_snake(&x)
+                }
+            });
+
+            // If pb_ident shares the same namespace with self, just use it. Or, import it by crate.
+            return if ident_crate_path == self.file_path {
+                iter::once("crate".to_string()).chain(ident_path).join("::")
+            } else {
+                let crate_name = iter::once(crate_base)
+                    .chain(ident_crate_path.iter())
+                    .join("_");
+                self.imports.insert(ident_crate_path);
+                iter::once(crate_name).chain(ident_path).join("::")
+            };
         }
 
         let mut local_path = self.package.split('.').peekable();
@@ -941,7 +1013,7 @@ impl<'a> CodeGenerator<'a> {
             .join("::")
     }
 
-    fn field_type_tag(&self, field: &FieldDescriptorProto) -> Cow<'static, str> {
+    fn field_type_tag(&mut self, field: &FieldDescriptorProto) -> Cow<'static, str> {
         match field.r#type() {
             Type::Float => Cow::Borrowed("float"),
             Type::Double => Cow::Borrowed("double"),
@@ -967,7 +1039,7 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn map_value_type_tag(&self, field: &FieldDescriptorProto) -> Cow<'static, str> {
+    fn map_value_type_tag(&mut self, field: &FieldDescriptorProto) -> Cow<'static, str> {
         match field.r#type() {
             Type::Enum => Cow::Owned(format!(
                 "enumeration({})",
