@@ -55,3 +55,25 @@ impl BytesType {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wrapper {
+    Arc,
+    Box,
+}
+
+impl Wrapper {
+    pub(crate) fn as_tag(&self) -> &'static str {
+        match self {
+            Wrapper::Arc => "arc",
+            Wrapper::Box => "boxy",
+        }
+    }
+
+    pub(crate) fn as_type(&self) -> &'static str {
+        match self {
+            Wrapper::Arc => "::prost::alloc::sync::Arc",
+            Wrapper::Box => "::prost::alloc::boxed::Box",
+        }
+    }
+}

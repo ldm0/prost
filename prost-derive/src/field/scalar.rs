@@ -5,7 +5,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{quote, ToTokens, TokenStreamExt};
 use syn::{parse_str, Expr, ExprLit, Ident, Index, Lit, LitByteStr, Meta, MetaNameValue, Path};
 
-use crate::field::{bool_attr, set_option, tag_attr, Label};
+use crate::field::{bool_attr, field_ref, set_option, tag_attr, wrapper_attr, Label, Wrapper};
 
 /// A scalar protobuf field.
 #[derive(Clone)]
@@ -13,6 +13,7 @@ pub struct Field {
     pub ty: Ty,
     pub kind: Kind,
     pub tag: u32,
+    pub wrapper: Option<Wrapper>,
 }
 
 impl Field {
@@ -22,6 +23,7 @@ impl Field {
         let mut packed = None;
         let mut default = None;
         let mut tag = None;
+        let mut wrapper = None;
 
         let mut unknown_attrs = Vec::new();
 
@@ -30,6 +32,8 @@ impl Field {
                 set_option(&mut ty, t, "duplicate type attributes")?;
             } else if let Some(p) = bool_attr("packed", attr)? {
                 set_option(&mut packed, p, "duplicate packed attributes")?;
+            } else if let Some(w) = wrapper_attr(attr) {
+                set_option(&mut wrapper, w, "duplicate wrapper attribute")?;
             } else if let Some(t) = tag_attr(attr)? {
                 set_option(&mut tag, t, "duplicate tag attributes")?;
             } else if let Some(l) = Label::from_attr(attr) {
@@ -86,7 +90,12 @@ impl Field {
             (Some(Label::Repeated), _, false) => Kind::Repeated,
         };
 
-        Ok(Some(Field { ty, kind, tag }))
+        Ok(Some(Field {
+            ty,
+            kind,
+            tag,
+            wrapper,
+        }))
     }
 
     pub fn new_oneof(attrs: &[Meta]) -> Result<Option<Field>, Error> {
@@ -114,23 +123,24 @@ impl Field {
         };
         let encode_fn = quote!(::prost::encoding::#module::#encode_fn);
         let tag = self.tag;
+        let field = field_ref(&self.wrapper, ident);
 
         match self.kind {
             Kind::Plain(ref default) => {
                 let default = default.typed();
                 quote! {
-                    if #ident != #default {
-                        #encode_fn(#tag, &#ident, buf);
+                    if #field != &(#default) {
+                        #encode_fn(#tag, #field, buf);
                     }
                 }
             }
             Kind::Optional(..) => quote! {
-                if let ::core::option::Option::Some(ref value) = #ident {
+                if let ::core::option::Option::Some(value) = #field {
                     #encode_fn(#tag, value, buf);
                 }
             },
             Kind::Required(..) | Kind::Repeated | Kind::Packed => quote! {
-                #encode_fn(#tag, &#ident, buf);
+                #encode_fn(#tag, #field, buf);
             },
         }
     }
@@ -168,23 +178,24 @@ impl Field {
         };
         let encoded_len_fn = quote!(::prost::encoding::#module::#encoded_len_fn);
         let tag = self.tag;
+        let field = field_ref(&self.wrapper, ident);
 
         match self.kind {
             Kind::Plain(ref default) => {
                 let default = default.typed();
                 quote! {
-                    if #ident != #default {
-                        #encoded_len_fn(#tag, &#ident)
+                    if #field != &(#default) {
+                        #encoded_len_fn(#tag, #field)
                     } else {
                         0
                     }
                 }
             }
             Kind::Optional(..) => quote! {
-                #ident.as_ref().map_or(0, |value| #encoded_len_fn(#tag, value))
+                (#field).as_ref().map_or(0, |value| #encoded_len_fn(#tag, value))
             },
             Kind::Required(..) | Kind::Repeated | Kind::Packed => quote! {
-                #encoded_len_fn(#tag, &#ident)
+                #encoded_len_fn(#tag, #field)
             },
         }
     }
@@ -195,18 +206,26 @@ impl Field {
                 let default = default.typed();
                 match self.ty {
                     Ty::String | Ty::Bytes(..) => quote!(#ident.clear()),
-                    _ => quote!(#ident = #default),
+                    _ => {
+                        let default = quote!(#default);
+                        let default = if let Some(wrapper) = self.wrapper {
+                            wrapper.wrap_type(default)
+                        } else {
+                            default
+                        };
+                        quote!(#ident = #default)
+                    }
                 }
             }
-            Kind::Optional(_) => quote!(#ident = ::core::option::Option::None),
+            Kind::Optional(_) => quote!(#ident.take()),
             Kind::Repeated | Kind::Packed => quote!(#ident.clear()),
         }
     }
 
     /// Returns an expression which evaluates to the default value of the field.
     pub fn default(&self) -> TokenStream {
-        match self.kind {
-            Kind::Plain(ref value) | Kind::Required(ref value) => value.owned(),
+        match &self.kind {
+            Kind::Plain(value) | Kind::Required(value) => value.owned(),
             Kind::Optional(_) => quote!(::core::option::Option::None),
             Kind::Repeated | Kind::Packed => quote!(::prost::alloc::vec::Vec::new()),
         }
@@ -270,6 +289,7 @@ impl Field {
 
     /// Returns methods to embed in the message.
     pub fn methods(&self, ident: &TokenStream) -> Option<TokenStream> {
+        let field = field_ref(&self.wrapper, quote!(self.#ident));
         let mut ident_str = ident.to_string();
         if ident_str.starts_with("r#") {
             ident_str = ident_str.split_off(2);
@@ -294,15 +314,21 @@ impl Field {
                          or the default if the field is set to an invalid enum value.",
                         ident_str,
                     );
+                    let value = quote!(value as i32);
+                    let value = if let Some(wrapper) = self.wrapper {
+                        wrapper.wrap_type(value)
+                    } else {
+                        value
+                    };
                     quote! {
                         #[doc=#get_doc]
                         pub fn #get(&self) -> #ty {
-                            ::core::convert::TryFrom::try_from(self.#ident).unwrap_or(#default)
+                            ::core::convert::TryFrom::try_from(*#field).unwrap_or(#default)
                         }
 
                         #[doc=#set_doc]
                         pub fn #set(&mut self, value: #ty) {
-                            self.#ident = value as i32;
+                            self.#ident = #value;
                         }
                     }
                 }
@@ -312,6 +338,12 @@ impl Field {
                          or the default if the field is unset or set to an invalid enum value.",
                         ident_str,
                     );
+                    let value = quote!(::core::option::Option::Some(value as i32));
+                    let value = if let Some(wrapper) = self.wrapper {
+                        wrapper.wrap_type(value)
+                    } else {
+                        value
+                    };
                     quote! {
                         #[doc=#get_doc]
                         pub fn #get(&self) -> #ty {
@@ -323,7 +355,7 @@ impl Field {
 
                         #[doc=#set_doc]
                         pub fn #set(&mut self, value: #ty) {
-                            self.#ident = ::core::option::Option::Some(value as i32);
+                            self.#ident = #value;
                         }
                     }
                 }
@@ -334,6 +366,16 @@ impl Field {
                     );
                     let push = Ident::new(&format!("push_{}", ident_str), Span::call_site());
                     let push_doc = format!("Appends the provided enum value to `{}`.", ident_str);
+                    let pushing = if let Some(wrapper) = self.wrapper {
+                        let pushed = wrapper.wrap_type(quote!(pushed));
+                        quote! {
+                            let mut pushed = (*#field).clone();
+                            pushed.push(value as i32);
+                            self.#ident = #pushed;
+                        }
+                    } else {
+                        quote!(self.#ident.push(value as i32);)
+                    };
                     quote! {
                         #[doc=#iter_doc]
                         pub fn #get(&self) -> ::core::iter::FilterMap<
@@ -347,7 +389,7 @@ impl Field {
                         }
                         #[doc=#push_doc]
                         pub fn #push(&mut self, value: #ty) {
-                            self.#ident.push(value as i32);
+                            #pushing
                         }
                     }
                 }
@@ -356,9 +398,9 @@ impl Field {
             let ty = self.ty.rust_ref_type();
 
             let match_some = if self.ty.is_numeric() {
-                quote!(::core::option::Option::Some(val) => val,)
+                quote!(::core::option::Option::Some(val) => *val,)
             } else {
-                quote!(::core::option::Option::Some(ref val) => &val[..],)
+                quote!(::core::option::Option::Some(val) => &val[..],)
             };
 
             let get_doc = format!(
@@ -369,7 +411,7 @@ impl Field {
             Some(quote! {
                 #[doc=#get_doc]
                 pub fn #get(&self) -> #ty {
-                    match self.#ident {
+                    match (#field).as_ref() {
                         #match_some
                         ::core::option::Option::None => #default,
                     }

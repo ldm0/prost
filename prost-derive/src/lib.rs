@@ -115,10 +115,11 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
         let merge = field.merge(quote!(value));
         let tags = field.tags().into_iter().map(|tag| quote!(#tag));
         let tags = Itertools::intersperse(tags, quote!(|));
+        let mut_field = field.mut_field(field_ident);
 
         quote! {
             #(#tags)* => {
-                let mut value = &mut self.#field_ident;
+                let mut value = #mut_field;
                 #merge.map_err(|mut error| {
                     error.push(STRUCT_NAME, stringify!(#field_ident));
                     error
@@ -438,6 +439,7 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
     let merge = fields.iter().map(|(variant_ident, field)| {
         let tag = field.tags()[0];
         let merge = field.merge(quote!(value));
+        let default = field.default();
         quote! {
             #tag => {
                 match field {
@@ -445,7 +447,7 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
                         #merge
                     },
                     _ => {
-                        let mut owned_value = ::core::default::Default::default();
+                        let mut owned_value = #default;
                         let value = &mut owned_value;
                         #merge.map(|_| *field = ::core::option::Option::Some(#ident::#variant_ident(owned_value)))
                     },

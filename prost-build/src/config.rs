@@ -22,6 +22,7 @@ use crate::BytesType;
 use crate::MapType;
 use crate::Module;
 use crate::ServiceGenerator;
+use crate::Wrapper;
 
 /// Configuration options for Protobuf code generation.
 ///
@@ -35,7 +36,7 @@ pub struct Config {
     pub(crate) message_attributes: PathMap<String>,
     pub(crate) enum_attributes: PathMap<String>,
     pub(crate) field_attributes: PathMap<String>,
-    pub(crate) boxed: PathMap<()>,
+    pub(crate) field_wrappers: PathMap<Wrapper>,
     pub(crate) prost_types: bool,
     pub(crate) strip_enum_prefix: bool,
     pub(crate) out_dir: Option<PathBuf>,
@@ -352,6 +353,23 @@ impl Config {
         self
     }
 
+    fn field_wrapper<P>(&mut self, path: P, wrapper: Wrapper) -> &mut Self
+    where
+        P: AsRef<str>,
+    {
+        self.field_wrappers
+            .insert(path.as_ref().to_string(), wrapper);
+        self
+    }
+
+    pub fn arc<P>(&mut self, path: P) -> &mut Self
+    where
+        P: AsRef<str>,
+    {
+        self.field_wrapper(path, Wrapper::Arc);
+        self
+    }
+
     /// Wrap matched fields in a `Box`.
     ///
     /// # Arguments
@@ -369,7 +387,7 @@ impl Config {
     where
         P: AsRef<str>,
     {
-        self.boxed.insert(path.as_ref().to_string(), ());
+        self.field_wrapper(path, Wrapper::Box);
         self
     }
 
@@ -1159,7 +1177,7 @@ impl default::Default for Config {
             message_attributes: PathMap::default(),
             enum_attributes: PathMap::default(),
             field_attributes: PathMap::default(),
-            boxed: PathMap::default(),
+            field_wrappers: PathMap::default(),
             prost_types: true,
             strip_enum_prefix: true,
             out_dir: None,

@@ -4,7 +4,7 @@ use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{Expr, ExprLit, Ident, Lit, Meta, MetaNameValue, Token};
 
-use crate::field::{scalar, set_option, tag_attr};
+use crate::field::{scalar, set_option, tag_attr, wrapper_attr, Wrapper};
 
 #[derive(Clone, Debug)]
 pub enum MapTy {
@@ -41,6 +41,7 @@ fn fake_scalar(ty: scalar::Ty) -> scalar::Field {
     scalar::Field {
         ty,
         kind,
+        wrapper: None,
         tag: 0, // Not used here
     }
 }
@@ -51,15 +52,19 @@ pub struct Field {
     pub key_ty: scalar::Ty,
     pub value_ty: ValueTy,
     pub tag: u32,
+    pub wrapper: Option<Wrapper>,
 }
 
 impl Field {
     pub fn new(attrs: &[Meta], inferred_tag: Option<u32>) -> Result<Option<Field>, Error> {
         let mut types = None;
         let mut tag = None;
+        let mut wrapper = None;
 
         for attr in attrs {
-            if let Some(t) = tag_attr(attr)? {
+            if let Some(w) = wrapper_attr(attr) {
+                set_option(&mut wrapper, w, "duplicate wrapper attribute")?;
+            } else if let Some(t) = tag_attr(attr)? {
                 set_option(&mut tag, t, "duplicate tag attributes")?;
             } else if let Some(map_ty) = attr
                 .path()
@@ -114,6 +119,7 @@ impl Field {
                 key_ty,
                 value_ty,
                 tag,
+                wrapper,
             }),
             _ => None,
         })

@@ -4,9 +4,11 @@
 
 #![allow(clippy::implicit_hasher, clippy::ptr_arg)]
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
 use core::str;
@@ -681,6 +683,46 @@ impl sealed::BytesAdapter for Vec<u8> {
 
     fn append_to(&self, buf: &mut impl BufMut) {
         buf.put(self.as_slice())
+    }
+}
+
+impl<T> BytesAdapter for Box<T> where T: BytesAdapter {}
+
+impl<T> sealed::BytesAdapter for Box<T>
+where
+    T: BytesAdapter,
+{
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+
+    fn replace_with(&mut self, buf: impl Buf) {
+        self.as_mut().replace_with(buf)
+    }
+
+    fn append_to(&self, buf: &mut impl BufMut) {
+        self.as_ref().append_to(buf)
+    }
+}
+
+impl<T> BytesAdapter for Arc<T> where T: BytesAdapter {}
+
+impl<T> sealed::BytesAdapter for Arc<T>
+where
+    T: BytesAdapter,
+{
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+
+    fn replace_with(&mut self, buf: impl Buf) {
+        if let Some(this) = Arc::get_mut(self) {
+            this.replace_with(buf)
+        }
+    }
+
+    fn append_to(&self, buf: &mut impl BufMut) {
+        self.as_ref().append_to(buf)
     }
 }
 
