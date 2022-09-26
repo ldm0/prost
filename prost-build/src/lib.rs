@@ -1736,6 +1736,8 @@ edition = "2021"
 [dependencies]
 prost = "0.11"
 serde = {{ version = "1", features = ["derive"] }}
+num-derive = "0.3"
+num-traits = "0.2"
 "#,
         crate_name
     );
