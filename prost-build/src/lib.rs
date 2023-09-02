@@ -1777,7 +1777,7 @@ edition = "2021"
 
 [dependencies]
 prost = {{ workspace = true }}
-serde = {{ version = "1", features = ["derive"] }}
+serde = {{ workspace = true }}
 num-derive = {{ workspace = true }}
 num-traits = {{ workspace = true }}
 "#,
