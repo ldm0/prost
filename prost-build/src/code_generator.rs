@@ -230,7 +230,7 @@ impl<'a> CodeGenerator<'a> {
         self.push_indent();
         self.buf.push_str(&format!(
             "#[derive(Clone, {}PartialEq, {}::Message)]\n",
-            if self.message_graph.can_message_derive_copy(&fq_message_name) {
+            if self.can_message_derive_copy(&fq_message_name) {
                 "Copy, "
             } else {
                 ""
@@ -615,10 +615,10 @@ impl<'a> CodeGenerator<'a> {
         self.append_enum_attributes(&oneof_name);
         self.push_indent();
 
-        let can_oneof_derive_copy = oneof.fields.iter().all(|field| {
-            self.message_graph
-                .can_field_derive_copy(fq_message_name, &field.descriptor)
-        });
+        let can_oneof_derive_copy = oneof
+            .fields
+            .iter()
+            .all(|field| self.can_field_derive_copy(fq_message_name, &field.descriptor));
         self.buf.push_str(&format!(
             "#[derive(Clone, {}PartialEq, {}::Oneof)]\n",
             if can_oneof_derive_copy { "Copy, " } else { "" },
@@ -1119,6 +1119,60 @@ impl<'a> CodeGenerator<'a> {
             self.type_path.join("."),
             message_name,
         )
+    }
+
+    /// Returns `true` if this message can automatically derive Copy trait.
+    fn can_message_derive_copy(&self, fq_message_name: &str) -> bool {
+        assert_eq!(".", &fq_message_name[..1]);
+        self.message_graph
+            .get_message(fq_message_name)
+            .unwrap()
+            .field
+            .iter()
+            .all(|field| self.can_field_derive_copy(fq_message_name, field))
+    }
+
+    /// Returns `true` if the type of this field allows deriving the Copy trait.
+    fn can_field_derive_copy(&self, fq_message_name: &str, field: &FieldDescriptorProto) -> bool {
+        assert_eq!(".", &fq_message_name[..1]);
+
+        // repeated field cannot derive Copy
+        if field.label() == Label::Repeated {
+            false
+        } else if field.r#type() == Type::Message {
+            // nested and boxed messages cannot derive Copy
+            if self
+                .message_graph
+                .is_nested(field.type_name(), fq_message_name)
+                || self
+                    .config
+                    .boxed
+                    .get_first_field(fq_message_name, field.name())
+                    .is_some()
+            {
+                false
+            } else {
+                self.can_message_derive_copy(field.type_name())
+            }
+        } else {
+            matches!(
+                field.r#type(),
+                Type::Float
+                    | Type::Double
+                    | Type::Int32
+                    | Type::Int64
+                    | Type::Uint32
+                    | Type::Uint64
+                    | Type::Sint32
+                    | Type::Sint64
+                    | Type::Fixed32
+                    | Type::Fixed64
+                    | Type::Sfixed32
+                    | Type::Sfixed64
+                    | Type::Bool
+                    | Type::Enum
+            )
+        }
     }
 }
 

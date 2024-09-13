@@ -6,7 +6,7 @@ use petgraph::Graph;
 
 use prost_types::{
     field_descriptor_proto::{Label, Type},
-    DescriptorProto, FieldDescriptorProto, FileDescriptorProto,
+    DescriptorProto, FileDescriptorProto,
 };
 
 /// `MessageGraph` builds a graph of messages whose edges correspond to nesting.
@@ -74,6 +74,11 @@ impl MessageGraph {
         }
     }
 
+    /// Try get a message descriptor from current message graph
+    pub fn get_message(&self, message: &str) -> Option<&DescriptorProto> {
+        self.messages.get(message)
+    }
+
     /// Returns true if message type `inner` is nested in message type `outer`.
     pub fn is_nested(&self, outer: &str, inner: &str) -> bool {
         let outer = match self.index.get(outer) {
@@ -86,51 +91,5 @@ impl MessageGraph {
         };
 
         has_path_connecting(&self.graph, outer, inner, None)
-    }
-
-    /// Returns `true` if this message can automatically derive Copy trait.
-    pub fn can_message_derive_copy(&self, fq_message_name: &str) -> bool {
-        assert_eq!(".", &fq_message_name[..1]);
-        let msg = self.messages.get(fq_message_name).unwrap();
-        msg.field
-            .iter()
-            .all(|field| self.can_field_derive_copy(fq_message_name, field))
-    }
-
-    /// Returns `true` if the type of this field allows deriving the Copy trait.
-    pub fn can_field_derive_copy(
-        &self,
-        fq_message_name: &str,
-        field: &FieldDescriptorProto,
-    ) -> bool {
-        assert_eq!(".", &fq_message_name[..1]);
-
-        if field.label() == Label::Repeated {
-            false
-        } else if field.r#type() == Type::Message {
-            if self.is_nested(field.type_name(), fq_message_name) {
-                false
-            } else {
-                self.can_message_derive_copy(field.type_name())
-            }
-        } else {
-            matches!(
-                field.r#type(),
-                Type::Float
-                    | Type::Double
-                    | Type::Int32
-                    | Type::Int64
-                    | Type::Uint32
-                    | Type::Uint64
-                    | Type::Sint32
-                    | Type::Sint64
-                    | Type::Fixed32
-                    | Type::Fixed64
-                    | Type::Sfixed32
-                    | Type::Sfixed64
-                    | Type::Bool
-                    | Type::Enum
-            )
-        }
     }
 }
