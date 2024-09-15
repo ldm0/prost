@@ -438,6 +438,11 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
     let merge = fields.iter().map(|(variant_ident, field)| {
         let tag = field.tags()[0];
         let merge = field.merge(quote!(value));
+        let owned_value = if field.boxed() {
+            quote!(::prost::alloc::boxed::Box::new(owned_value))
+        } else {
+            quote!(owned_value)
+        };
         quote! {
             #tag => {
                 match field {
@@ -447,7 +452,7 @@ fn try_oneof(input: TokenStream) -> Result<TokenStream, Error> {
                     _ => {
                         let mut owned_value = ::core::default::Default::default();
                         let value = &mut owned_value;
-                        #merge.map(|_| *field = ::core::option::Option::Some(#ident::#variant_ident(owned_value)))
+                        #merge.map(|_| *field = ::core::option::Option::Some(#ident::#variant_ident(#owned_value)))
                     },
                 }
             }

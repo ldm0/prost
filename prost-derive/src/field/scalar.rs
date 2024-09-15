@@ -5,7 +5,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{quote, ToTokens, TokenStreamExt};
 use syn::{parse_str, Expr, ExprLit, Ident, Index, Lit, LitByteStr, Meta, MetaNameValue, Path};
 
-use crate::field::{bool_attr, set_option, tag_attr, Label};
+use crate::field::{bool_attr, set_bool, set_option, tag_attr, word_attr, Label};
 
 /// A scalar protobuf field.
 #[derive(Clone)]
@@ -13,6 +13,7 @@ pub struct Field {
     pub ty: Ty,
     pub kind: Kind,
     pub tag: u32,
+    pub boxed: bool,
 }
 
 impl Field {
@@ -22,6 +23,7 @@ impl Field {
         let mut packed = None;
         let mut default = None;
         let mut tag = None;
+        let mut boxed = false;
 
         let mut unknown_attrs = Vec::new();
 
@@ -30,6 +32,8 @@ impl Field {
                 set_option(&mut ty, t, "duplicate type attributes")?;
             } else if let Some(p) = bool_attr("packed", attr)? {
                 set_option(&mut packed, p, "duplicate packed attributes")?;
+            } else if word_attr("boxed", attr) {
+                set_bool(&mut boxed, "duplicate boxed attribute")?;
             } else if let Some(t) = tag_attr(attr)? {
                 set_option(&mut tag, t, "duplicate tag attributes")?;
             } else if let Some(l) = Label::from_attr(attr) {
@@ -86,7 +90,12 @@ impl Field {
             (Some(Label::Repeated), _, false) => Kind::Repeated,
         };
 
-        Ok(Some(Field { ty, kind, tag }))
+        Ok(Some(Field {
+            ty,
+            kind,
+            tag,
+            boxed,
+        }))
     }
 
     pub fn new_oneof(attrs: &[Meta]) -> Result<Option<Field>, Error> {

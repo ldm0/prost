@@ -140,6 +140,17 @@ impl Field {
         }
     }
 
+    /// Returns whether whis field is wrapped by `Box`
+    pub fn boxed(&self) -> bool {
+        match self {
+            Field::Scalar(scalar) => scalar.boxed,
+            Field::Message(message) => message.boxed,
+            Field::Map(_) => false,
+            Field::Oneof(oneof) => oneof.boxed,
+            Field::Group(group) => group.boxed,
+        }
+    }
+
     /// Produces the fragment implementing debug for the given field.
     pub fn debug(&self, ident: TokenStream) -> TokenStream {
         match *self {

@@ -633,6 +633,12 @@ impl<'a> CodeGenerator<'a> {
         self.path.push(2);
         self.depth += 1;
         for field in &oneof.fields {
+            let boxed = self.boxed(
+                &field.descriptor,
+                fq_message_name,
+                Some(oneof.descriptor.name()),
+            );
+
             self.path.push(field.path_index);
             self.append_doc(fq_message_name, Some(field.descriptor.name()));
             self.path.pop();
@@ -640,20 +646,15 @@ impl<'a> CodeGenerator<'a> {
             self.push_indent();
             let ty_tag = self.field_type_tag(&field.descriptor);
             self.buf.push_str(&format!(
-                "#[prost({}, tag=\"{}\")]\n",
+                "#[prost({}{}, tag=\"{}\")]\n",
                 ty_tag,
+                if boxed { ", boxed" } else { "" },
                 field.descriptor.number()
             ));
             self.append_field_attributes(&oneof_name, field.descriptor.name());
 
             self.push_indent();
             let ty = self.resolve_type(&field.descriptor, fq_message_name);
-
-            let boxed = self.boxed(
-                &field.descriptor,
-                fq_message_name,
-                Some(oneof.descriptor.name()),
-            );
 
             debug!(
                 "    oneof: {:?}, type: {:?}, boxed: {}",
