@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package boxed_tests;
+
+message Container {
+  oneof data {
+    Foo foo = 1;
+    Foo boxed_foo = 2;
+    Bar bar = 3;
+    Bar boxed_bar = 4;
+    Baz baz = 5;
+    Baz boxed_baz = 6;
+  }
+}
+
+message Foo {
+  string s = 1;
+  string boxed_s = 2;
+  int32 i = 3;
+  int32 boxed_i = 4;
+}
+
+message Bar {
+  Baz baz = 1;
+  Baz boxed_baz = 2;
+}
+
+message Baz {
+  string x = 1;
+}

@@ -166,6 +166,16 @@ fn main() {
         .unwrap();
 
     prost_build::Config::new()
+        .boxed("Container.data.boxed_foo")
+        .boxed("Container.data.boxed_bar")
+        .boxed("Container.data.boxed_baz")
+        .boxed("Foo.boxed_s")
+        .boxed("Foo.boxed_i")
+        .boxed("Bar.baz")
+        .compile_protos(&[src.join("boxed_tests.proto")], includes)
+        .unwrap();
+
+    prost_build::Config::new()
         .enable_type_names()
         .type_name_domain([".type_names.Foo"], "tests")
         .compile_protos(&[src.join("type_names.proto")], includes)

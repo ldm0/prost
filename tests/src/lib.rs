@@ -144,6 +144,10 @@ pub mod default_string_escape {
     include!(concat!(env!("OUT_DIR"), "/default_string_escape.rs"));
 }
 
+pub mod boxed_tests {
+    include!(concat!(env!("OUT_DIR"), "/boxed_tests.rs"));
+}
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
