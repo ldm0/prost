@@ -9,6 +9,7 @@ use crate::field::{set_bool, set_option, tag_attr, word_attr, Label};
 pub struct Field {
     pub label: Label,
     pub tag: u32,
+    pub boxed: bool,
 }
 
 impl Field {
@@ -53,6 +54,7 @@ impl Field {
         Ok(Some(Field {
             label: label.unwrap_or(Label::Optional),
             tag,
+            boxed,
         }))
     }
 
